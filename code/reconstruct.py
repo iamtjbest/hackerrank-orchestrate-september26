@@ -425,25 +425,25 @@ def build_user_context(ds, user_id: str) -> UserContext:
     return UserContext(user_id=user_id, profile=profile, recurring=recurring, one_offs=one_offs)
 
 
-def project_cashflow(
+def project_cashflow_detailed(
     ctx: UserContext,
     request_date: str,
     horizon_days: int = 90,
     spending_changes: Optional[List[dict]] = None,
-) -> List[Tuple[str, float]]:
-    """Return [(date_str, signed_delta)] for every projected cash movement in
-    (request_date, request_date + horizon_days], home currency.
-
-    spending_changes: list of {"action": "stop"|"reduce_to", "event_id": ..., "new_amount": ...}
-    keyed by the series' last_event_id (the identifier used in spending_changes_needed).
-    """
+) -> List[dict]:
+    """Like project_cashflow, but each record keeps its provenance:
+    {date, signed, category, direction, description_hint, source, series}
+    (source is "recurring" or "one_off"; series is the RecurringSeries object
+    or None). Used by project_cashflow (which strips this down to plain
+    (date, signed) tuples) and by evaluation/diagnostics.py, which needs to
+    explain *why* a given date is the binding constraint."""
     spending_changes = spending_changes or []
     stop_ids = {c["event_id"] for c in spending_changes if c["action"] == "stop"}
     reduce_map = {c["event_id"]: c["new_amount"] for c in spending_changes if c["action"] == "reduce_to"}
 
     start = _parse(request_date)
     end = start + timedelta(days=horizon_days)
-    deltas: List[Tuple[str, float]] = []
+    records: List[dict] = []
 
     for series in ctx.recurring:
         sign = 1.0 if series.direction == "credit" else -1.0
@@ -481,12 +481,36 @@ def project_cashflow(
                 amount = min(amount, reduced_amount)
             if series.one_time_addon and series.one_time_addon[0] == occ_date:
                 amount = amount + series.one_time_addon[1]
-            deltas.append((occ_date, sign * amount))
+            records.append({
+                "date": occ_date, "signed": sign * amount, "category": series.category,
+                "direction": series.direction, "description_hint": series.description_hint,
+                "source": "recurring", "series": series,
+            })
 
     for oo in ctx.one_offs:
         od = _parse(oo.date)
         if start < od <= end:
-            deltas.append((oo.date, oo.amount))
+            records.append({
+                "date": oo.date, "signed": oo.amount, "category": oo.category,
+                "direction": "credit" if oo.amount > 0 else "debit", "description_hint": "",
+                "source": "one_off", "series": None,
+            })
 
-    deltas.sort(key=lambda x: x[0])
-    return deltas
+    records.sort(key=lambda r: r["date"])
+    return records
+
+
+def project_cashflow(
+    ctx: UserContext,
+    request_date: str,
+    horizon_days: int = 90,
+    spending_changes: Optional[List[dict]] = None,
+) -> List[Tuple[str, float]]:
+    """Return [(date_str, signed_delta)] for every projected cash movement in
+    (request_date, request_date + horizon_days], home currency.
+
+    spending_changes: list of {"action": "stop"|"reduce_to", "event_id": ..., "new_amount": ...}
+    keyed by the series' last_event_id (the identifier used in spending_changes_needed).
+    """
+    records = project_cashflow_detailed(ctx, request_date, horizon_days, spending_changes)
+    return [(r["date"], r["signed"]) for r in records]
