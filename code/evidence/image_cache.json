@@ -1,0 +1,18 @@
+{
+  "event_253": {"amount": 4365000, "currency": "IDR", "source": "payslip net salary", "image_id": "image_01"},
+  "event_1442": {"amount": 100000, "currency": "INR", "source": "rent receipt balance due", "image_id": "image_02"},
+  "event_1545": {"amount": 41272.00, "currency": "INR", "source": "grocery receipt net amount", "image_id": "image_03"},
+  "event_1700": {"amount": 2854.00, "currency": "INR", "source": "item bill total (delivery fee row cut off, use Item Bill)", "image_id": "image_04"},
+  "event_1786": {"amount": 704.05, "currency": "INR", "source": "telecom amount due till bill date", "image_id": "image_05"},
+  "event_3051": {"amount": 1995.00, "currency": "INR", "source": "grocery tax invoice total", "image_id": "image_06"},
+  "event_3231": {"amount": 8528.10, "currency": "INR", "source": "restaurant invoice total incl. tax", "image_id": "image_07"},
+  "event_4535": {"amount": 15339.00, "currency": "INR", "source": "maintenance receipt total amount received", "image_id": "image_08"},
+  "event_5170": {"amount": 723.00, "currency": "INR", "source": "water bill total", "image_id": "image_09"},
+  "event_6033": {"amount": 79679.26, "currency": "INR", "source": "grocery order pending, use Balance Due", "image_id": "image_10"},
+  "event_6859": {"amount": 3650.00, "currency": "INR", "source": "hospital provisional bill total", "image_id": "image_11"},
+  "event_7307": {"amount": 33.50, "currency": "INR", "source": "receipt uses $ symbol but event currency is INR, use numeric total", "image_id": "image_12"},
+  "event_7941": {"amount": 2298, "currency": "INR", "source": "order total paid", "image_id": "image_13"},
+  "event_9421": {"amount": 4593.00, "currency": "INR", "source": "handwritten pharmacy bill total", "image_id": "image_14"},
+  "event_9806": {"amount": 9968.00, "currency": "INR", "source": "flight invoice grand total incl. taxes", "image_id": "image_15"},
+  "event_10521": {"amount": 393.22, "currency": "INR", "source": "EV charging invoice total", "image_id": "image_16"}
+}
