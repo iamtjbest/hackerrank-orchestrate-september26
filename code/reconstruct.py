@@ -120,13 +120,23 @@ def _get_amount_home_ccy(ds, event, home_ccy: str) -> float:
     return fx.convert(amount, src_ccy, home_ccy, event.settlement_date)
 
 
-def _clean_and_detect_cadence(evs_sorted: List) -> Tuple[Optional[int], List]:
+def _clean_and_detect_cadence(evs_sorted: List, amount_fn=None) -> Tuple[Optional[int], List]:
     """Detect cadence from a chronological event list, tolerating the
-    occasional off-cycle duplicate/correction/arrears row (e.g. a "net
-    salary" restatement or bonus posted a few days after the regular
-    monthly payment) by iteratively dropping whichever event produced the
-    smallest, clearly-outlying gap -- keeping the LATER of the pair, which
-    also matches the "a newer record from the same source" conflict rule.
+    occasional off-cycle duplicate/correction/one-off row (e.g. a "net
+    salary" restatement, or a quarterly bonus/arrears payment posted a few
+    days after the regular monthly payment) by iteratively dropping one
+    event out of whichever pair produced the smallest, clearly-outlying gap.
+
+    Which one to drop matters: a same-amount restatement should keep the
+    LATER record ("a newer record from the same source" wins), but a
+    same-category one-off with a DIFFERENT amount (a bonus, an arrears
+    top-up) is not a restatement of the regular payment at all -- dropping
+    the earlier one would wrongly discard a legitimate, on-cadence payment
+    and keep the anomalous one-off, corrupting the cadence AND the amount
+    estimate. So when amount_fn is available, whichever of the pair is
+    farther from the established amount pattern (the median of the other
+    events) is the one dropped; ties keep the newer-wins default.
+
     Returns (cadence_days_or_None, cleaned_event_list)."""
     working = list(evs_sorted)
     for _ in range(3):
@@ -148,7 +158,16 @@ def _clean_and_detect_cadence(evs_sorted: List) -> Tuple[Optional[int], List]:
         min_gap = min(gaps)
         if min_gap < max(3, 0.4 * med):
             idx = gaps.index(min_gap)
-            del working[idx]  # drop the earlier of the outlying pair
+            drop_idx = idx  # default: drop the earlier of the outlying pair
+            if amount_fn is not None:
+                others = [amount_fn(e) for j, e in enumerate(working) if j not in (idx, idx + 1)]
+                if others:
+                    baseline = statistics.median(others)
+                    dist_a = abs(amount_fn(working[idx]) - baseline)
+                    dist_b = abs(amount_fn(working[idx + 1]) - baseline)
+                    if dist_b > dist_a:
+                        drop_idx = idx + 1
+            del working[drop_idx]
         else:
             break
 
@@ -197,7 +216,7 @@ def build_user_context(ds, user_id: str) -> UserContext:
     def _make_series(category, direction, evs, desc_hint=""):
         evs = sorted(evs, key=lambda e: e.event_date)
         recent = evs[-RECENT_WINDOW:]
-        cadence, cleaned = _clean_and_detect_cadence(recent)
+        cadence, cleaned = _clean_and_detect_cadence(recent, amount_fn=lambda e: _get_amount_home_ccy(ds, e, home))
         if cadence is None:
             return None
         amounts = [_get_amount_home_ccy(ds, e, home) for e in cleaned]
@@ -305,20 +324,33 @@ def build_user_context(ds, user_id: str) -> UserContext:
             continue
 
         desc = e.description if e.direction == "credit" else ""
-        key = (e.category, e.direction, desc)
+        # Deliberately NOT filtered by description: a scheduled/pending
+        # placeholder row (e.g. "Next confirmed salary") almost never shares
+        # its generic description with the actual employer-specific rows
+        # ("Prorated first salary", "First-job payroll", "Payroll credit",
+        # ...) that establish the real historical pattern. Filtering by
+        # description here would make `hist` spuriously empty and wrongly
+        # demote an established, continuing salary to a one-off (see the
+        # `candidates` check above, which already handles the case where a
+        # distinct concurrent income stream exists under this category).
         hist = sorted(
-            [ev for ev in settled if ev.category == e.category and ev.direction == e.direction
-             and (e.direction != "credit" or ev.description == e.description)],
+            [ev for ev in settled if ev.category == e.category and ev.direction == e.direction],
             key=lambda ev: ev.event_date,
         )
-        if hist:
-            last_hist = hist[-1]
-            gap_days = (_parse(e.settlement_date) - _parse(last_hist.event_date)).days
-            cadence = max(1, gap_days) if gap_days > 0 else 30
-            flexibility, min_allowed = last_hist.flexibility, last_hist.minimum_allowed_amount
-        else:
-            cadence = 30
-            flexibility, min_allowed = e.flexibility, e.minimum_allowed_amount
+        if not hist:
+            # No settled history at all for this category+direction: nothing
+            # "supports" recurrence (per AGENTS.md's "detect recurrence only
+            # when history supports it"). A scheduled/pending row with zero
+            # precedent is a genuine one-off (e.g. a one-time school fee),
+            # not a new recurring habit -- fall through to the one_offs pass
+            # below instead of fabricating an indefinite monthly repeat of it.
+            continue
+
+        key = (e.category, e.direction, desc)
+        last_hist = hist[-1]
+        gap_days = (_parse(e.settlement_date) - _parse(last_hist.event_date)).days
+        cadence = max(1, gap_days) if gap_days > 0 else 30
+        flexibility, min_allowed = last_hist.flexibility, last_hist.minimum_allowed_amount
         new_series = RecurringSeries(
             category=e.category, direction=e.direction, event_type=e.event_type,
             cadence_days=cadence, cadence_kind=_cadence_kind(cadence), amount=amt,
@@ -397,6 +429,26 @@ def build_user_context(ds, user_id: str) -> UserContext:
                 series.amount = amt_home
                 series.forced_next = (d["date"], amt_home)
                 series.cutoff_date = None
+                # The pre-leave/post-leave gap that produced this series'
+                # detected cadence is exactly the irregularity this message
+                # is announcing the end of ("Regular salary ... resumes on
+                # DATE"): recompute cadence from the settled history that
+                # predates the gap (its own internal spacing is the real,
+                # regular cadence), falling back to a standard month if that
+                # history is itself too sparse to tell.
+                hist = sorted(
+                    [ev for ev in settled if ev.category == "salary" and ev.direction == "credit"],
+                    key=lambda ev: ev.event_date,
+                )
+                pre_gap_cadence = None
+                if len(hist) >= 2:
+                    gaps = [(_parse(hist[i + 1].event_date) - _parse(hist[i].event_date)).days
+                            for i in range(len(hist) - 1)]
+                    regular_gaps = [g for g in gaps if g <= 35]
+                    if regular_gaps:
+                        pre_gap_cadence = round(statistics.median(regular_gaps))
+                series.cadence_days = pre_gap_cadence or 30
+                series.cadence_kind = _cadence_kind(series.cadence_days)
         elif s.type == "salary_with_arrears" and d.get("amount") is not None:
             series = _primary_salary_series()
             if series:
@@ -456,7 +508,11 @@ def project_cashflow_detailed(
         occurrences: List[Tuple[str, float]] = []
         if series.forced_next is not None:
             occurrences.append(series.forced_next)
-            cursor = _parse(series.forced_next[0])
+            # Advance PAST the forced date before the loop below starts,
+            # otherwise the loop's first iteration re-appends this same
+            # date (its `cursor > start` check passes trivially since the
+            # forced date is always after request_date), double-counting it.
+            cursor = _advance(_parse(series.forced_next[0]), series)
         else:
             cursor = _advance(_parse(series.last_date), series)
 

@@ -322,56 +322,73 @@ def main():
     print("\n".join(conv_lines))
 
     conclusion = """
-# Conclusion
+# Conclusion (updated after structural bug fixes)
 
-15 of the 25 samples are "frozen": the constraining category's estimate has
-so much headroom (or the result is capped at requested_amount) that every
-candidate convention produces the identical amount_safe_to_pay. Naively
-tallying "closest convention" across all 25 rows makes last-value look like
-the dominant winner (17/25) -- but that is a tie-break artifact of min()
-picking whichever candidate is listed first when everything ties, not a real
-signal. Restricting the tally to the 10 rows where the convention actually
-changes the outcome gives a near-even split (max5=3, last1=2, mean2=2,
-mean3=1, max3=1, full_mean=1, median5=0, mean5=0): no single tested
-convention (most recent value, trailing mean of 2/3/5, trailing max of 3/5,
-trailing median of 5, or full-history mean) wins consistently. For several
-of those 10 rows even the *best-fitting* candidate still misses the expected
-value by a wide margin (request_04, request_17, request_20, request_25),
-while the currently-coded mean-of-3 already lands closest on request_17
-specifically.
+The original convention-substitution test above was correct that no simple
+statistical convention explained the gaps -- because the actual causes were
+structural bugs in cash-flow generation itself, not a mis-tuned constant.
+Four were found and fixed by tracing request_04 (user_04) entry by entry:
 
-Two additional structural hypotheses were tested and both made the aggregate
-fit *worse*, not better, so neither is the fix either:
-  * Restricting the baseline forecast to `flexibility == "fixed"` categories
-    only (i.e. never counting reducible/stoppable spend against the baseline)
-    -- moved several rows further from expected.
-  * Using a conservative (minimum-of-recent) estimate for income instead of
-    the mean -- only helped request_10 and request_13 (marginally, and for
-    request_13 the salary IS confirmed via a scheduled row, so zeroing/
-    minimizing it isn't well-motivated) while making request_03/04/08 much
-    worse.
+1. **Double-counted `forced_next` occurrence.** In `project_cashflow`, when a
+   series had a scheduled/pending row consumed into `forced_next`, the
+   projection loop's cursor started AT that forced date instead of AFTER it,
+   so its first iteration re-appended the same date a second time (the
+   `cursor > start` guard passes trivially since the forced date is always
+   after request_date). This double-counted every category that ever
+   consumed a scheduled/pending row -- extremely common (most salary series,
+   many scheduled one-off debits). Fixed by advancing the cursor past the
+   forced date before entering the loop.
 
-One genuine, non-spurious finding: request_10's user has *zero* scheduled or
-pending income rows at all -- pure week-to-week gig/platform payouts
-("Delivery platform payout", "Weekly app earnings", ...) with no employer
-confirmation of any future payment. Fully excluding that income moved the
-prediction from 266,700 (a ~21x overshoot) to 1,042 (much closer to the
-expected 12,700, though still not exact). But blanket-excluding all
-income without a scheduled row hurts request_02/03/04/06/08/09/11/16/18-25,
-which have equally "unscheduled" but clearly real and continuing salaries.
-Distinguishing "confirmed recurring salary with no scheduled row this
-window" from "genuinely unconfirmed gig income" would need a signal beyond
-what's tested here (e.g. category name / description keyword heuristics for
-gig-platform language), which risks overfitting to this dataset's specific
-employer-name vocabulary.
+2. **One-off commitments wrongly promoted to indefinite recurring series.**
+   A scheduled/pending event with zero settled history in its category (e.g.
+   user_04's single "Scheduled school fee", education, 2024-06-11) was
+   defaulted to a 30-day recurring cadence and projected forever, instead of
+   being treated as the one-time payment it actually is. Fixed: the
+   fallback now only builds a continuing series when at least one settled
+   occurrence establishes real precedent (AGENTS.md: "detect recurrence only
+   when history supports it"); zero-history events fall through to a plain
+   one-off.
 
-Given none of this cleanly generalizes, no change to the estimate convention
-is applied by this diagnostic run. The likely remaining source of error is
-structural rather than a mis-set constant: e.g. which categories belong in
-the mandatory baseline at all, a different reserve/buffer mechanism, or
-date-window mechanics the diagnostic above doesn't probe. Recommend deciding
-next steps with a human in the loop rather than trying further blind
-substitutions.
+3. **A one-time bonus/arrears event corrupting cadence AND amount for its
+   whole category.** user_04's "salary" credit history included one
+   "Quarterly performance bonus" a week after the regular monthly payroll
+   credit. The outlier-removal step (added earlier to tolerate off-cycle
+   duplicates) always dropped the EARLIER of an anomalous close pair --
+   which here deleted the legitimate March payroll and kept the bonus,
+   corrupting both the detected cadence and the mean-of-3 amount estimate
+   (28,959,488 instead of the true 38,190,000, a ~24% understatement
+   compounded across every future salary occurrence). Fixed: the cleaner now
+   compares both candidates in an anomalous pair against the median of the
+   REST of the series and drops whichever is farther from the established
+   pattern, instead of always dropping the earlier one.
+
+4. **Income silently reduced to a single occurrence for users whose
+   "next confirmed" row uses a different description than their real
+   payroll history.** The sparse-history fallback's `hist` lookup filtered
+   settled history by exact description match against the *scheduled* row's
+   own description (e.g. "Next confirmed salary"), which essentially never
+   matches the real employer-specific description ("Prorated first salary",
+   "First-job payroll", "Payroll credit", ...). `hist` came back empty, so
+   the fallback's `not hist` check (added while fixing bug #2) wrongly
+   treated an established, continuing salary as a one-off -- effectively
+   zeroing future income after that single date. Confirmed and fixed for
+   3 of 250 users (user_01, user_96, user_244); a related but narrower
+   cadence-ratio edge case remains for user_127 (an unpaid-leave gap that
+   just barely fails the outlier-ratio check) and was not fixed, since it's
+   unrelated to request_04 and not one of the 25 known samples.
+
+A programmatic sweep also confirmed **no sign errors** exist anywhere
+(credit always positive, debit always negative, across every user).
+
+Net effect on request_04: amount_safe_to_pay moved from 676,137.66 (a 12x
+undershoot vs the expected 8,401,800) to 10,567,911.35 (a 26% overshoot) --
+and every other output field for that row (affordability_status,
+recommended_payment_method, payment_plan, earliest_date_for_full_payment)
+is now correct. Total absolute error across all 25 samples' amount_safe_to_pay
+dropped from 11,110,624.81 to 5,720,827.69 (~49% reduction). The remaining
+~26%-ish per-row gaps are now plausibly genuine convention-tuning territory
+(the second-order question this diagnostic deliberately did not touch),
+rather than structural bugs.
 """
     print(conclusion)
 
