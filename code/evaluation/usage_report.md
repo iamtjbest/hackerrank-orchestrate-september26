@@ -53,6 +53,7 @@ genuinely can't cover the input -- and in this dataset, they always do.
   | salary_with_arrears | 8 |
   | salary_date_amendment | 7 |
   | expense_rent_increase | 7 |
+  | salary_partial_end | 7 |
   | ignore_internal_transfer | 6 |
   | reimbursement_reclassify | 3 |
   | ignore_injection | 2 |
