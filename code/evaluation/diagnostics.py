@@ -149,10 +149,6 @@ def _test_conventions(ds, ctx, req, series, expected):
     return results, best
 
 
-def _all_history_amounts_for_series_worst(tr):
-    return tr
-
-
 def main():
     ds = load_dataset()
     rows = _load_samples()
@@ -393,6 +389,77 @@ dropped from 11,110,624.81 to 5,720,827.69 (~49% reduction). The remaining
 ~26%-ish per-row gaps are now plausibly genuine convention-tuning territory
 (the second-order question this diagnostic deliberately did not touch),
 rather than structural bugs.
+
+## Round 2: full-250-request sweeps + decision_explanation diff
+
+Three evidence-gathering sweeps were run across all 250 real requests (not
+just the 25 samples), per user request:
+
+1. **Pending-credit leak check.** 7/250 requests have a `pending`+`credit`
+   event inside the user's 90-day forecast window. All 7 confirmed to
+   contribute exactly 0 to the projected balance -- 0 leaks. AGENTS.md
+   Section 6.3 ("do not count pending credits... until they settle") is
+   correctly enforced everywhere, not just in the 25 samples.
+
+2. **Same-category near-duplicate check.** 24 pairs found across all users
+   where a settled event and a scheduled/pending event in the same category
+   fall within ~2 weeks of each other. 18/24 were already handled
+   correctly (regular occurrence and one-off both projected separately).
+   6/24 were a real bug: six "Possible duplicate card charge" events
+   (user_138, user_156, user_198, user_210, user_234, user_252), each
+   linked via `messages.csv` to a bank message explicitly describing the
+   charge as disputed/under investigation with the reversal not yet
+   posted, were being merged into the regular recurring shopping series as
+   its "next occurrence" -- silently replacing the real next monthly charge
+   with the disputed extra one. Fixed with an anomaly-keyword guard
+   (`"duplicate"` in the event description) in `reconstruct.py` that routes
+   these events to `one_offs` instead of `forced_next`/a new series,
+   applied at both of the two code paths that could otherwise still
+   consume them (the existing-series match, and the sparse-history
+   new-series fallback).
+
+3. **Blank-amount image-cache flow-through check.** All 16 events whose
+   amount was blank in the raw CSV and filled from the image cache were
+   checked. Only 2/16 (event_6033, event_6859) fall inside any real
+   request's 90-day window at all; both are confirmed flowing correctly
+   into the projected cash flow (not dropped, not zeroed). The other
+   14/16, including the user-cited event_1786, are correctly reconstructed
+   in their user's context (verified directly via `build_user_context`)
+   but simply don't fall inside that user's one real request's forecast
+   window -- there being only one request per user, "not in-window" here
+   means "not relevant to this dataset's grading," not "silently dropped."
+
+**decision_explanation character-level diff** (never done in an earlier
+round): word-level diffing every sample's predicted vs. truth explanation
+found two distinct, previously-unhandled truth phrasings:
+
+- For `method == "wait"`: when `earliest_date_for_full_payment` equals
+  `desired_completion_date` truth reads "Pay X in full on DATE. Paying
+  earlier would take the balance below the Y minimum." (confirmed on
+  request_03, 08, 13); when there is slack before the deadline it instead
+  reads "Wait until DATE, then pay X in full. Paying sooner would put the
+  Y minimum at risk." (request_04). This split is clean across all 4
+  "wait" samples with zero counterexamples, so it was fixed in
+  `explain.py`. decision_explanation accuracy on the 25 samples moved from
+  8/25 (32%) to 9/25 (36%) as a direct, isolated result -- only request_04
+  changed, nothing else regressed.
+- For `method == "not_recommended"`, truth uses two different phrasings
+  ("Do not proceed... cannot be completed safely within 90 days" vs. "Do
+  not make this payment by DATE... None of the available options keeps
+  the Y minimum protected") that could NOT be reduced to a clean rule from
+  the 6 available samples -- `max_installment_months` blank/non-blank
+  looked promising (request_14/24 blank -> template C, request_05/20/25
+  non-blank -> template D) but request_15 (blank) breaks it by using
+  template D. Per AGENTS.md's "do not invent unsupported... facts," this
+  was left UNCHANGED rather than encoding an unverified guess that could
+  as easily hurt accuracy on the 250-row set as help it. Flagged here as
+  an open item rather than silently left unmentioned.
+
+Every other sample-level field (amount_safe_to_pay, affordability_status,
+recommended_payment_method, payment_plan, earliest_date_for_full_payment,
+spending_changes_needed) is unchanged by this round's fixes, since none of
+them touch estimate-convention/tuning logic -- both fixes are structural
+(anomaly routing) or presentational (explanation wording), as requested.
 """
     print(conclusion)
 

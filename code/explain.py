@@ -73,10 +73,16 @@ def build_explanation(ds, ctx, request, result: dict) -> str:
     method = chosen.method
 
     if method == "wait":
-        pay_date = _human_date(chosen.plan[0][0])
+        pay_date_str = chosen.plan[0][0]
+        pay_date = _human_date(pay_date_str)
+        if pay_date_str == request.desired_completion_date:
+            return (
+                f"Pay {ccy} {fmt_money(chosen.plan[0][1])} in full on {pay_date}. "
+                f"Paying earlier would take the balance below the {ccy} {fmt_money(min_balance)} minimum."
+            )
         return (
-            f"Pay {ccy} {fmt_money(chosen.plan[0][1])} in full on {pay_date}. "
-            f"Paying earlier would take the balance below the {ccy} {fmt_money(min_balance)} minimum."
+            f"Wait until {pay_date}, then pay {ccy} {fmt_money(chosen.plan[0][1])} in full. "
+            f"Paying sooner would put the {ccy} {fmt_money(min_balance)} minimum at risk."
         )
 
     if method == "installments":

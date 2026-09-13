@@ -293,14 +293,27 @@ def build_user_context(ds, user_id: str) -> UserContext:
     # have formed a series at all (a brand-new job), seeds a fresh one so the
     # user's only known future income/expense in that category doesn't just
     # vanish from the 90-day forecast after this single occurrence.
+    # A pending/scheduled event flagged as an anomaly against the account
+    # (a disputed/possibly-duplicate charge under investigation, confirmed by
+    # a linked bank message saying so) is never eligible to be treated as
+    # "the next occurrence" of a regular recurring series, however close its
+    # date lands to one -- it is by definition an extra, unexplained debit on
+    # top of the user's normal spending pattern, not a precisely-dated
+    # instance of it. Consuming it into forced_next would let it cannibalize
+    # (replace the date/amount of) the real next occurrence instead of both
+    # being reserved. AGENTS.md 6.3: "Reserve pending debits" -- as their own
+    # line item, not as a stand-in for a different, regular one.
+    ANOMALY_KEYWORDS = ("duplicate",)
+
     for e in explicit_future:
         if e.direction == "debit" and e.event_type not in EXPENSE_TYPES:
             continue
         if e.direction == "credit" and e.event_type not in INCOME_TYPES:
             continue
         amt = _get_amount_home_ccy(ds, e, home)
+        is_anomaly = any(kw in e.description.lower() for kw in ANOMALY_KEYWORDS)
 
-        candidates = _series_for(e.category, e.direction)
+        candidates = _series_for(e.category, e.direction) if not is_anomaly else []
         best = None
         for cand in candidates:
             if cand.forced_next is not None:
@@ -313,6 +326,16 @@ def build_user_context(ds, user_id: str) -> UserContext:
             best[0].forced_next = (e.settlement_date, amt)
             consumed_ids.add(e.event_id)
             continue
+
+        if is_anomaly:
+            # Never seed a *new* recurring series from a flagged anomaly
+            # either -- same reasoning as above, just for the sparse-history
+            # path below (a category with too little settled history to have
+            # formed a series yet). A disputed/possibly-duplicate charge is
+            # not evidence of an emerging recurring pattern.
+            continue
+
+        candidates = _series_for(e.category, e.direction)
 
         if candidates:
             # An existing recurring series already covers this category, but
